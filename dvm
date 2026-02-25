@@ -183,8 +183,7 @@ cmd_current() {
 }
 
 cmd_help() {
-  cat <<EOF
-
+  printf '%b\n' "
   ${BOLD}dvm${RESET} — Droid Version Manager v${VERSION}
 
   ${BOLD}USAGE${RESET}
@@ -205,8 +204,7 @@ cmd_help() {
 
   ${BOLD}PREREQUISITES${RESET}
     Node.js and pnpm or npm must be installed.
-
-EOF
+"
 }
 
 # ── main dispatch ──────────────────────────────────────────────────────
