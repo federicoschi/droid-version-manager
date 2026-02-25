@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dvm — Droid Version Manager
+# Pin Factory AI's droid CLI to a specific npm version when the
+# auto-updating distribution channel is unstable, and revert cleanly
+# when it stabilises.
+
+readonly VERSION="1.0.0"
+readonly FACTORY_INSTALL_URL="https://app.factory.ai/cli"
+readonly FACTORY_BIN="$HOME/.local/bin/droid"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dvm"
+readonly STATE_FILE="$STATE_DIR/pin"
+
+# ── colours (disabled when piped) ─────────────────────────────────────
+if [[ -t 1 ]]; then
+  BOLD="\033[1m"  DIM="\033[2m"  RED="\033[31m"  GREEN="\033[32m"
+  YELLOW="\033[33m"  CYAN="\033[36m"  RESET="\033[0m"
+else
+  BOLD="" DIM="" RED="" GREEN="" YELLOW="" CYAN="" RESET=""
+fi
+
+# ── helpers ────────────────────────────────────────────────────────────
+info()  { printf "${CYAN}info${RESET}  %s\n" "$*"; }
+ok()    { printf "${GREEN}  ok${RESET}  %s\n" "$*"; }
+warn()  { printf "${YELLOW}warn${RESET}  %s\n" "$*" >&2; }
+die()   { printf "${RED} err${RESET}  %s\n" "$*" >&2; exit 1; }
+
+need() {
+  command -v "$1" &>/dev/null || die "'$1' is required but not found in PATH."
+}
+
+pkg_manager() {
+  if command -v pnpm &>/dev/null; then echo pnpm
+  elif command -v npm &>/dev/null; then echo npm
+  else die "Neither pnpm nor npm found. Install one and retry."
+  fi
+}
+
+save_state() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$1" > "$STATE_FILE"
+}
+
+clear_state() {
+  rm -f "$STATE_FILE"
+}
+
+read_state() {
+  [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo ""
+}
+
+current_version() {
+  local v
+  v=$(droid -v 2>/dev/null) || v="(not installed)"
+  echo "$v"
+}
+
+droid_source() {
+  local bin
+  bin=$(command -v droid 2>/dev/null) || { echo "none"; return; }
+  case "$bin" in
+    */.local/bin/droid)        echo "factory" ;;
+    */pnpm/*|*/npm/*)          echo "npm"     ;;
+    */node_modules/.bin/droid) echo "npm"     ;;
+    *)                         echo "unknown ($bin)" ;;
+  esac
+}
+
+# ── commands ───────────────────────────────────────────────────────────
+
+cmd_status() {
+  local ver src pinned
+  ver=$(current_version)
+  src=$(droid_source)
+  pinned=$(read_state)
+
+  printf "\n"
+  printf "  ${BOLD}Droid Version Manager${RESET} v%s\n" "$VERSION"
+  printf "  ─────────────────────────────\n"
+  printf "  ${DIM}Current version :${RESET}  %s\n" "$ver"
+  printf "  ${DIM}Binary source   :${RESET}  %s\n" "$src"
+  if [[ -n "$pinned" ]]; then
+    printf "  ${DIM}Pinned to       :${RESET}  ${YELLOW}%s${RESET}\n" "$pinned"
+  else
+    printf "  ${DIM}Pinned to       :${RESET}  ${GREEN}(none — using factory channel)${RESET}\n"
+  fi
+  printf "\n"
+}
+
+cmd_list() {
+  need node
+  info "Fetching available versions from npm registry..."
+  local versions
+  versions=$(npm view droid versions --json 2>/dev/null)
+
+  if [[ -z "$versions" ]]; then
+    die "Could not fetch versions. Check your network connection."
+  fi
+
+  local current pinned
+  current=$(current_version)
+  pinned=$(read_state)
+
+  printf "\n  ${BOLD}Available droid versions${RESET}\n"
+  printf "  ───────────────────────\n"
+
+  echo "$versions" | sed 's/[]",[]//g' | tr -s ' ' '\n' | while read -r v; do
+    [[ -z "$v" ]] && continue
+    local marker=""
+    if [[ "$v" == "$pinned" ]]; then
+      marker=" ${YELLOW}◀ pinned${RESET}"
+    elif [[ "$v" == "$current" ]]; then
+      marker=" ${GREEN}◀ current${RESET}"
+    fi
+    printf "  %s%b\n" "$v" "$marker"
+  done
+  printf "\n"
+}
+
+cmd_pin() {
+  local target="${1:-}"
+  [[ -z "$target" ]] && die "Usage: dvm pin <version>  (e.g. dvm pin 0.61.0)"
+
+  need node
+  local pm
+  pm=$(pkg_manager)
+
+  info "Installing droid@$target via $pm..."
+  if [[ "$pm" == "pnpm" ]]; then
+    pnpm i -g "droid@$target"
+  else
+    npm i -g "droid@$target"
+  fi
+
+  if [[ -e "$FACTORY_BIN" ]]; then
+    info "Removing factory auto-updating binary at $FACTORY_BIN..."
+    rm -rf "$FACTORY_BIN"
+    ok "Factory binary removed."
+  fi
+
+  save_state "$target"
+
+  local resolved
+  resolved=$(current_version)
+  ok "Pinned to droid@$resolved"
+  printf "\n  Run ${BOLD}dvm status${RESET} to confirm, or ${BOLD}dvm unpin${RESET} to revert.\n\n"
+}
+
+cmd_unpin() {
+  local pinned
+  pinned=$(read_state)
+  if [[ -z "$pinned" ]]; then
+    warn "No version is currently pinned. Nothing to do."
+    return
+  fi
+
+  local pm
+  pm=$(pkg_manager)
+
+  info "Removing npm-installed droid ($pm rm -g droid)..."
+  if [[ "$pm" == "pnpm" ]]; then
+    pnpm rm -g droid 2>/dev/null || true
+  else
+    npm rm -g droid 2>/dev/null || true
+  fi
+  ok "npm package removed."
+
+  info "Reinstalling factory distribution channel..."
+  curl -fsSL "$FACTORY_INSTALL_URL" | sh
+  ok "Factory installer executed."
+
+  clear_state
+
+  local resolved
+  resolved=$(current_version)
+  ok "Restored to factory channel (droid@$resolved)"
+  printf "\n"
+}
+
+cmd_current() {
+  current_version
+}
+
+cmd_help() {
+  cat <<EOF
+
+  ${BOLD}dvm${RESET} — Droid Version Manager v${VERSION}
+
+  ${BOLD}USAGE${RESET}
+    dvm <command> [args]
+
+  ${BOLD}COMMANDS${RESET}
+    ${CYAN}status${RESET}            Show current droid version, source and pin state
+    ${CYAN}list${RESET}              List all available versions on the npm registry
+    ${CYAN}pin <version>${RESET}     Pin droid to a specific npm version (e.g. 0.61.0)
+    ${CYAN}unpin${RESET}             Remove the pin and restore the factory channel
+    ${CYAN}current${RESET}           Print the current droid version (machine-friendly)
+    ${CYAN}help${RESET}              Show this help message
+
+  ${BOLD}EXAMPLES${RESET}
+    dvm pin 0.61.0    # downgrade to a known-good release
+    dvm status         # check what you're running
+    dvm unpin          # go back to factory auto-updates
+
+  ${BOLD}PREREQUISITES${RESET}
+    Node.js and pnpm or npm must be installed.
+
+EOF
+}
+
+# ── main dispatch ──────────────────────────────────────────────────────
+main() {
+  local cmd="${1:-status}"
+  shift 2>/dev/null || true
+
+  case "$cmd" in
+    status)  cmd_status ;;
+    list|ls) cmd_list "$@" ;;
+    pin)     cmd_pin "$@" ;;
+    unpin)   cmd_unpin "$@" ;;
+    current) cmd_current ;;
+    help|-h|--help) cmd_help ;;
+    version|-v|--version) echo "dvm $VERSION" ;;
+    *)       die "Unknown command: $cmd. Run 'dvm help' for usage." ;;
+  esac
+}
+
+main "$@"
