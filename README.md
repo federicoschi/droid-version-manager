@@ -88,7 +88,7 @@ This will:
 2. Remove the factory auto-updating binary (`~/.local/bin/droid`, or `%USERPROFILE%\bin\droid.exe` on Windows) if it exists.
 3. Record the pin so `dvm status` reflects it.
 
-On Windows, if `droid.exe` is locked because a droid session is running (including the one you may be typing this from), dvm renames it to `droid.exe.dvm-old` instead of failing, and cleans it up on `dvm unpin`.
+On Windows, if `droid.exe` is locked because a droid session is running, dvm renames it to `droid.exe.dvm-old` instead of failing, and cleans it up on `dvm unpin`.
 
 ### Unpin and restore factory updates
 
@@ -113,6 +113,20 @@ This will:
 | `dvm current`     | Print the current droid version (machine-friendly)   |
 | `dvm help`        | Show usage information                               |
 | `dvm --version`   | Print dvm's own version                              |
+
+## Troubleshooting (Windows)
+
+**`pnpm found but its global bin dir is not configured`**
+pnpm installed through `npm i -g pnpm` cannot perform global installs until `pnpm setup` has been run. dvm detects this and falls back to npm automatically, so the pin still succeeds. Run `pnpm setup` (then reopen your terminal) if you would rather dvm use pnpm.
+
+**`npm error code ETARGET` / `No matching version found ... with a date before <date>`**
+Your npm config sets `min-release-age` or `before`, which hides recently published versions from the registry. Check with `npm config get min-release-age`, and pick an older version or relax the setting.
+
+**Pin succeeded but `dvm status` still reports the old version**
+The npm global bin directory is not on your `PATH`, or is listed after `%USERPROFILE%\bin`. dvm warns when it detects this. Run `npm config get prefix` and make sure that directory comes first in `PATH`, then open a new terminal.
+
+**`droid.exe` could not be removed**
+Windows locks a running executable. dvm renames it to `droid.exe.dvm-old` instead of failing; close any running droid session if you want it deleted outright.
 
 ## How it works
 

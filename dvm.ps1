@@ -9,10 +9,16 @@
 
 # No param() block on purpose: it would swallow "-v" / "--version" / "-h"
 # during PowerShell parameter binding. $args receives everything verbatim.
-$ErrorActionPreference = 'Stop'
+#
+# 'Continue', not 'Stop': npm and pnpm write progress and warnings to stderr,
+# which PowerShell 5.1 turns into a terminating error under 'Stop' whenever the
+# stream is redirected. Exit codes are checked explicitly instead.
+$ErrorActionPreference = 'Continue'
 
+# @(...) is required: a single-element array returned from an if-block unrolls
+# to a bare string, and $Rest[0] would then index its first *character*.
 $Command = if ($args.Count -ge 1) { [string]$args[0] } else { 'status' }
-$Rest    = if ($args.Count -ge 2) { $args[1..($args.Count - 1)] } else { @() }
+$Rest    = @(if ($args.Count -ge 2) { $args[1..($args.Count - 1)] })
 
 $DvmVersion        = '1.0.0'
 $FactoryInstallUrl = 'https://app.factory.ai/cli/windows'
@@ -27,8 +33,18 @@ function Write-Warn { param([string]$Message) Write-Host 'warn ' -ForegroundColo
 function Die        { param([string]$Message) Write-Host ' err ' -ForegroundColor Red -NoNewline; Write-Host " $Message"; exit 1 }
 
 function Get-PackageManager {
-  if (Get-Command pnpm -ErrorAction SilentlyContinue) { return 'pnpm' }
-  if (Get-Command npm  -ErrorAction SilentlyContinue) { return 'npm' }
+  # pnpm is frequently present on Windows via `npm i -g pnpm` but unusable for
+  # global installs until `pnpm setup` has run, so verify before choosing it.
+  if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+    & pnpm bin -g *>$null
+    if ($LASTEXITCODE -eq 0) { return 'pnpm' }
+    if (Get-Command npm -ErrorAction SilentlyContinue) {
+      Write-Warn 'pnpm found but its global bin dir is not configured (run "pnpm setup"). Falling back to npm.'
+      return 'npm'
+    }
+    Die 'pnpm is installed but not set up for global installs. Run "pnpm setup" and retry.'
+  }
+  if (Get-Command npm -ErrorAction SilentlyContinue) { return 'npm' }
   Die 'Neither pnpm nor npm found. Install one and retry.'
 }
 
@@ -60,16 +76,35 @@ function Get-CurrentVersion {
   return ([string]$v).Trim()
 }
 
+function Get-GlobalBinDirs {
+  # npm/pnpm install global shims (droid, droid.cmd, droid.ps1) into these.
+  $dirs = @()
+  if (Get-Command npm -ErrorAction SilentlyContinue) {
+    $p = (& npm config get prefix 2>$null | Select-Object -First 1)
+    if ($p) { $dirs += ([string]$p).Trim() }
+  }
+  if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+    $p = (& pnpm bin -g 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $p) { $dirs += ([string]$p).Trim() }
+  }
+  return @($dirs | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
+}
+
 function Get-DroidSource {
   $cmd = Get-DroidCommand
   if (-not $cmd) { return 'none' }
   $path = $cmd.Source
   if (-not $path) { return "unknown ($($cmd.Name))" }
 
-  if ($path -ieq $FactoryBin)          { return 'factory' }
-  if ($path -imatch '\\npm\\')         { return 'npm' }
-  if ($path -imatch '\\pnpm\\')        { return 'npm' }
-  if ($path -imatch '\\node_modules\\'){ return 'npm' }
+  if ($path -ieq $FactoryBin) { return 'factory' }
+
+  # Match on the containing directory, not the extension: npm resolves to a
+  # .ps1/.cmd/bash shim depending on the shell, and all live in the global bin.
+  $dir = (Split-Path -Parent $path).TrimEnd('\')
+  foreach ($d in Get-GlobalBinDirs) {
+    if ($dir -ieq $d) { return 'npm' }
+  }
+  if ($path -imatch '\\node_modules\\') { return 'npm' }
   return "unknown ($path)"
 }
 
@@ -89,14 +124,14 @@ function Remove-FactoryBinary {
   # (including when dvm itself was launched from inside a droid session).
   # Renaming a locked file is allowed, so fall back to that and clean up later.
   try {
-    Remove-Item -Path $FactoryBin -Force
+    Remove-Item -Path $FactoryBin -Force -ErrorAction Stop
     Write-Ok 'Factory binary removed.'
     return
   } catch {
     $stale = "$FactoryBin.dvm-old"
     Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue
     try {
-      Move-Item -Path $FactoryBin -Destination $stale -Force
+      Move-Item -Path $FactoryBin -Destination $stale -Force -ErrorAction Stop
       Write-Ok "Factory binary was in use; moved aside to $stale"
     } catch {
       Die "Could not remove $FactoryBin ($($_.Exception.Message)). Close any running droid session and retry."
@@ -170,6 +205,13 @@ function Invoke-Pin {
   Save-PinState $Target
 
   $resolved = Get-CurrentVersion
+  if ($resolved -ne $Target) {
+    Write-Warn "Installed droid@$Target but 'droid' still resolves to $resolved."
+    $binDirs = Get-GlobalBinDirs
+    if ($binDirs) {
+      Write-Warn "Make sure $($binDirs -join ' or ') is on your PATH, then open a new terminal."
+    }
+  }
   Write-Ok "Pinned to droid@$resolved"
   Write-Host ''
   Write-Host '  Run ' -NoNewline; Write-Host 'dvm status' -ForegroundColor White -NoNewline
@@ -196,7 +238,7 @@ function Invoke-Unpin {
   Write-Info 'Reinstalling factory distribution channel...'
   $installer = Join-Path ([System.IO.Path]::GetTempPath()) "factory-cli-install-$([guid]::NewGuid().ToString('N')).ps1"
   try {
-    Invoke-WebRequest -Uri $FactoryInstallUrl -OutFile $installer -UseBasicParsing
+    Invoke-WebRequest -Uri $FactoryInstallUrl -OutFile $installer -UseBasicParsing -ErrorAction Stop
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
     if ($LASTEXITCODE -ne 0) { Die 'Factory installer failed.' }
   } finally {
