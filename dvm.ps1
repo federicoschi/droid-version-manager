@@ -119,6 +119,37 @@ function Get-AvailableVersions {
   return @($json | ConvertFrom-Json)
 }
 
+function Test-ReleaseAgeBlock {
+  # npm's min-release-age/before settings hide recent publishes, so a version
+  # that plainly exists fails with a bare ETARGET. Explain that when it applies.
+  param([string]$Target)
+
+  $before = (& npm config get before 2>$null | Select-Object -First 1)
+  $age    = (& npm config get min-release-age 2>$null | Select-Object -First 1)
+  if (-not $before -or $before -eq 'null' -or $before -eq 'undefined') { return }
+
+  # npm prints a JS Date.toString(), e.g.
+  #   "Sun Jul 26 2026 01:49:32 GMT+0200 (Ora legale dell'Europa centrale)"
+  # .NET parses neither the localized timezone name nor the "GMT+0200" offset,
+  # so drop the former and colon-separate the latter before an exact parse.
+  $clean = (($before -replace '\s*\(.*\)\s*$', '').Trim()) -replace 'GMT([+-])(\d{2})(\d{2})', 'GMT$1$2:$3'
+  try {
+    $cutoff = [datetimeoffset]::ParseExact($clean, 'ddd MMM dd yyyy HH:mm:ss \G\M\Tzzz', [cultureinfo]::InvariantCulture)
+  } catch { return }
+
+  try {
+    $time = (Invoke-RestMethod -Uri 'https://registry.npmjs.org/droid' -UseBasicParsing).time
+  } catch { return }
+
+  $published = $time.$Target
+  if (-not $published) { return }
+  if ([datetimeoffset]$published -ge $cutoff) {
+    $pub = ([datetimeoffset]$published).ToString('yyyy-MM-dd')
+    Write-Warn "droid@$Target was published $pub, but your npm config hides releases newer than $($cutoff.ToString('yyyy-MM-dd')) (min-release-age=$age)."
+    Write-Warn "Retry with 'dvm pin $Target --allow-recent' to override, or pick an older version."
+  }
+}
+
 function Remove-FactoryBinary {
   # Windows locks a running .exe, so a plain delete fails when droid is open
   # (including when dvm itself was launched from inside a droid session).
@@ -185,17 +216,24 @@ function Invoke-List {
 }
 
 function Invoke-Pin {
-  param([string]$Target)
+  param([string]$Target, [bool]$AllowRecent)
 
   if ([string]::IsNullOrWhiteSpace($Target)) {
-    Die 'Usage: dvm pin <version>  (e.g. dvm pin 0.61.0)'
+    Die 'Usage: dvm pin <version> [--allow-recent]  (e.g. dvm pin 0.61.0)'
   }
 
   $pm = Get-PackageManager
 
+  # min-release-age is an npm-only setting; pnpm ignores the flag entirely.
+  $extra = @()
+  if ($AllowRecent -and $pm -eq 'npm') { $extra += '--min-release-age=0' }
+
   Write-Info "Installing droid@$Target via $pm..."
-  if ($pm -eq 'pnpm') { & pnpm i -g "droid@$Target" } else { & npm i -g "droid@$Target" }
-  if ($LASTEXITCODE -ne 0) { Die "$pm failed to install droid@$Target." }
+  if ($pm -eq 'pnpm') { & pnpm i -g "droid@$Target" } else { & npm i -g "droid@$Target" @extra }
+  if ($LASTEXITCODE -ne 0) {
+    if (-not $AllowRecent) { Test-ReleaseAgeBlock $Target }
+    Die "$pm failed to install droid@$Target."
+  }
 
   if (Test-Path $FactoryBin) {
     Write-Info "Removing factory auto-updating binary at $FactoryBin..."
@@ -269,6 +307,7 @@ function Invoke-Help {
   Write-Host '    status        ' -ForegroundColor Cyan -NoNewline; Write-Host '    Show current droid version, source and pin state'
   Write-Host '    list          ' -ForegroundColor Cyan -NoNewline; Write-Host '    List all available versions on the npm registry'
   Write-Host '    pin <version> ' -ForegroundColor Cyan -NoNewline; Write-Host '    Pin droid to a specific npm version (e.g. 0.61.0)'
+  Write-Host '                  ' -NoNewline;                        Write-Host '    --allow-recent bypasses npm min-release-age' -ForegroundColor DarkGray
   Write-Host '    unpin         ' -ForegroundColor Cyan -NoNewline; Write-Host '    Remove the pin and restore the factory channel'
   Write-Host '    current       ' -ForegroundColor Cyan -NoNewline; Write-Host '    Print the current droid version (machine-friendly)'
   Write-Host '    help          ' -ForegroundColor Cyan -NoNewline; Write-Host '    Show this help message'
@@ -288,7 +327,11 @@ switch ($Command.ToLowerInvariant()) {
   'status'    { Invoke-Status }
   'list'      { Invoke-List }
   'ls'        { Invoke-List }
-  'pin'       { Invoke-Pin $Rest[0] }
+  'pin'       {
+    $allowRecent = [bool](@($Rest) -match '^--allow-recent$')
+    $version     = @($Rest | Where-Object { $_ -notlike '--*' })[0]
+    Invoke-Pin $version $allowRecent
+  }
   'unpin'     { Invoke-Unpin }
   'current'   { Get-CurrentVersion }
   'help'      { Invoke-Help }
@@ -299,3 +342,7 @@ switch ($Command.ToLowerInvariant()) {
   '--version' { Write-Output "dvm $DvmVersion" }
   default     { Die "Unknown command: $Command. Run 'dvm help' for usage." }
 }
+
+# A successful run must not inherit $LASTEXITCODE from the last native command
+# it happened to call (e.g. the 'pnpm bin -g' probe, which exits 1 by design).
+exit 0

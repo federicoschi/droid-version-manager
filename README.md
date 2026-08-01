@@ -108,7 +108,7 @@ This will:
 | ----------------- | ---------------------------------------------------- |
 | `dvm status`      | Show current version, binary source, and pin state   |
 | `dvm list`        | List all versions available on the npm registry      |
-| `dvm pin <ver>`   | Pin droid to a specific version                      |
+| `dvm pin <ver>`   | Pin droid to a specific version (`--allow-recent` bypasses npm's `min-release-age`) |
 | `dvm unpin`       | Remove the pin and restore the factory channel       |
 | `dvm current`     | Print the current droid version (machine-friendly)   |
 | `dvm help`        | Show usage information                               |
@@ -120,7 +120,13 @@ This will:
 pnpm installed through `npm i -g pnpm` cannot perform global installs until `pnpm setup` has been run. dvm detects this and falls back to npm automatically, so the pin still succeeds. Run `pnpm setup` (then reopen your terminal) if you would rather dvm use pnpm.
 
 **`npm error code ETARGET` / `No matching version found ... with a date before <date>`**
-Your npm config sets `min-release-age` or `before`, which hides recently published versions from the registry. Check with `npm config get min-release-age`, and pick an older version or relax the setting.
+Your npm config sets `min-release-age` or `before`, which hides recently published versions from the registry. dvm detects this and tells you when the version was published versus your cutoff. Either pick an older version, or override for a single install:
+
+```powershell
+dvm pin 0.185.0 --allow-recent
+```
+
+Note that npm only enforces this on a cold cache, so the same version may install fine once it has been fetched before.
 
 **Pin succeeded but `dvm status` still reports the old version**
 The npm global bin directory is not on your `PATH`, or is listed after `%USERPROFILE%\bin`. dvm warns when it detects this. Run `npm config get prefix` and make sure that directory comes first in `PATH`, then open a new terminal.
