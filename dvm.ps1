@@ -112,11 +112,20 @@ function Get-AvailableVersions {
   if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     Die "'npm' is required to query the registry but was not found in PATH."
   }
-  $json = (& npm view droid versions --json 2>$null) -join ''
+  # One call for both: 'time' carries the publish date of every version, plus
+  # 'created'/'modified' keys that are not versions and must be skipped.
+  $json = (& npm view droid versions time --json 2>$null) -join ''
   if ([string]::IsNullOrWhiteSpace($json)) {
     Die 'Could not fetch versions. Check your network connection.'
   }
-  return @($json | ConvertFrom-Json)
+  $data = $json | ConvertFrom-Json
+  return @($data.versions | ForEach-Object {
+    $published = $data.time.$_
+    [pscustomobject]@{
+      Version = $_
+      Date    = if ($published) { ([datetimeoffset]$published).ToString('yyyy-MM-dd') } else { '' }
+    }
+  })
 }
 
 function Test-ReleaseAgeBlock {
@@ -200,16 +209,20 @@ function Invoke-List {
   $current  = Get-CurrentVersion
   $pinned   = Read-PinState
 
+  $width = ($versions.Version | Measure-Object -Maximum -Property Length).Maximum
+
   Write-Host ''
   Write-Host '  Available droid versions' -ForegroundColor White
   Write-Host '  ───────────────────────'
   foreach ($v in $versions) {
-    if ($v -eq $pinned) {
-      Write-Host "  $v" -NoNewline; Write-Host '  ◀ pinned' -ForegroundColor Yellow
-    } elseif ($v -eq $current) {
-      Write-Host "  $v" -NoNewline; Write-Host '  ◀ current' -ForegroundColor Green
+    Write-Host ("  {0}  " -f $v.Version.PadRight($width)) -NoNewline
+    Write-Host $v.Date -ForegroundColor DarkGray -NoNewline
+    if ($v.Version -eq $pinned) {
+      Write-Host '  ◀ pinned' -ForegroundColor Yellow
+    } elseif ($v.Version -eq $current) {
+      Write-Host '  ◀ current' -ForegroundColor Green
     } else {
-      Write-Host "  $v"
+      Write-Host ''
     }
   }
   Write-Host ''

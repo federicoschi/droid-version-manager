@@ -91,10 +91,11 @@ cmd_status() {
 cmd_list() {
   need node
   info "Fetching available versions from npm registry..."
-  local versions
-  versions=$(npm view droid versions --json 2>/dev/null)
+  # 'time' carries each version's publish date, so one call covers both.
+  local data
+  data=$(npm view droid versions time --json 2>/dev/null)
 
-  if [[ -z "$versions" ]]; then
+  if [[ -z "$data" ]]; then
     die "Could not fetch versions. Check your network connection."
   fi
 
@@ -105,15 +106,29 @@ cmd_list() {
   printf "\n  ${BOLD}Available droid versions${RESET}\n"
   printf "  ───────────────────────\n"
 
-  echo "$versions" | sed 's/[]",[]//g' | tr -s ' ' '\n' | while read -r v; do
+  # node is already required above and parses the payload far more reliably
+  # than sed/tr, which cannot pair versions with their dates.
+  node -e '
+    let raw = "";
+    process.stdin.on("data", d => raw += d);
+    process.stdin.on("end", () => {
+      const { versions = [], time = {} } = JSON.parse(raw);
+      const width = versions.reduce((m, v) => Math.max(m, v.length), 0);
+      for (const v of versions) {
+        const date = time[v] ? time[v].slice(0, 10) : "";
+        process.stdout.write(v.padEnd(width) + "\t" + date + "\n");
+      }
+    });
+  ' <<< "$data" | while IFS=$'\t' read -r v date; do
     [[ -z "$v" ]] && continue
     local marker=""
-    if [[ "$v" == "$pinned" ]]; then
+    local trimmed="${v%"${v##*[![:space:]]}"}"
+    if [[ "$trimmed" == "$pinned" ]]; then
       marker=" ${YELLOW}◀ pinned${RESET}"
-    elif [[ "$v" == "$current" ]]; then
+    elif [[ "$trimmed" == "$current" ]]; then
       marker=" ${GREEN}◀ current${RESET}"
     fi
-    printf "  %s%b\n" "$v" "$marker"
+    printf "  %s  ${DIM}%s${RESET}%b\n" "$v" "$date" "$marker"
   done
   printf "\n"
 }

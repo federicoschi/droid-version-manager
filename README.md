@@ -68,13 +68,15 @@ $ dvm list
 
   Available droid versions
   ───────────────────────
-  0.57.5
-  0.57.6
+  0.57.5   2026-02-05
+  0.57.6   2026-02-06
   ...
-  0.61.0  ◀ pinned
-  0.62.0
-  0.62.1
+  0.61.0   2026-02-24  ◀ pinned
+  0.62.0   2026-02-24
+  0.62.1   2026-02-25
 ```
+
+Publish dates come from the npm registry, which makes it easy to tell how old a release is before pinning to it.
 
 ### Pin to a known-good release
 
